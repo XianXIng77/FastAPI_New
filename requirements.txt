@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+sqlalchemy[asyncio]>=2,<3
+asyncpg
+pydantic-settings>=2,<3
+python-dotenv>=1,<2
+pwdlib[argon2]>=0.3,<1
+fastapi-users[sqlalchemy]>=15.0.5,<16

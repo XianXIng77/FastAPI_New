@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# 仅供测试使用；正式应用仍使用 asyncpg 连接 PostgreSQL。
+pytest>=8,<10
+httpx>=0.28,<1
+aiosqlite>=0.20,<1
