@@ -5,13 +5,16 @@ const statusLine = document.getElementById("status");
 const output = document.getElementById("output");
 const protectedButtons = ["profile", "refresh", "logout"];
 const sensitiveFields = new Set(["access_token", "refresh_token", "password", "hashed_password"]);
+const { hostname, port, pathname } = window.location;
+const isIdePreview = ["localhost", "127.0.0.1", "[::1]"].includes(hostname) &&
+  port === "63342" && pathname.endsWith("/ui/index.html");
 let tokens = null;
 let revokedTokens = null;
 let busy = false;
 
 function renderControls() {
   for (const button of document.querySelectorAll("button")) {
-    button.disabled = busy ||
+    button.disabled = isIdePreview || busy ||
       (protectedButtons.includes(button.id) && !tokens) ||
       (button.id === "verify-logout" && !revokedTokens);
   }
@@ -33,7 +36,7 @@ async function request(endpoint, { method = "POST", payload, accessToken } = {})
 }
 
 async function run(label, action) {
-  if (busy) return;
+  if (isIdePreview || busy) return;
   busy = true;
   renderControls();
   statusLine.dataset.state = "";
@@ -128,3 +131,6 @@ document.getElementById("verify-logout").addEventListener("click", () => {
 });
 
 renderControls();
+if (isIdePreview) {
+  window.location.replace("http://127.0.0.1:8000/ui/");
+}

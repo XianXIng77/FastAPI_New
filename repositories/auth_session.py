@@ -4,29 +4,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import AuthSession, RefreshToken, User
-
-
-async def get_active_user(
-    session: AsyncSession,
-    *,
-    user_id: UUID,
-    session_id: UUID,
-    now: datetime,
-) -> User | None:
-    """只返回仍启用且拥有有效会话的用户。"""
-    statement = (
-        select(User)
-        .join(AuthSession, AuthSession.user_id == User.id)
-        .where(
-            User.id == user_id,
-            User.is_active.is_(True),
-            AuthSession.id == session_id,
-            AuthSession.revoked_at.is_(None),
-            AuthSession.expires_at > now,
-        )
-    )
-    return await session.scalar(statement)
+from models import AuthSession, RefreshToken
 
 
 async def lock_for_refresh(session: AsyncSession, token_hash: str) -> AuthSession | None:
@@ -59,3 +37,16 @@ async def revoke(
         .values(revoked_at=now)
     )
     await session.execute(statement)
+
+
+async def revoke_all_for_user(
+    session: AsyncSession, *, user_id: UUID, now: datetime
+) -> list[UUID]:
+    """撤销账号的所有未撤销会话，并返回需要从 Redis 移除的会话 ID。"""
+    statement = (
+        update(AuthSession)
+        .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+        .returning(AuthSession.id)
+    )
+    return list(await session.scalars(statement))

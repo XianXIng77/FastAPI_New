@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=10, ge=0)
     db_max_overflow: int = Field(default=20, ge=-1)
     db_pool_pre_ping: bool = True
+    redis_url: SecretStr | None = None
+    redis_connect_timeout_seconds: float = Field(default=2, gt=0, allow_inf_nan=False)
+    redis_command_timeout_seconds: float = Field(default=2, gt=0, allow_inf_nan=False)
+    redis_max_connections: int = Field(default=20, gt=0)
     jwt_secret_key: Annotated[SecretStr, Field(min_length=32)] | None = None
     access_token_lifetime_seconds: int = Field(default=900, gt=0)
     refresh_token_lifetime_seconds: int = Field(default=604800, gt=0)

@@ -1,24 +1,36 @@
 """集中声明接口共用的依赖，避免每个接口重复定义。"""
 
-from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.security import InvalidAccessToken, decode_access_token
 from db.session import get_db
 from models import User
-from repositories import auth_session as auth_session_repository
+from repositories import redis_session as redis_session_repository
+from repositories import user as user_repository
 
 
 # 接口参数写 session: SessionDep，FastAPI 就会调用 get_db 提供会话。
 # 复用的是依赖声明，每次请求仍然创建并关闭自己的会话。
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
 _bearer = HTTPBearer(bearerFormat="JWT", auto_error=False)
+
+
+async def get_redis(request: Request) -> Redis:
+    """获取应用已初始化的共享 Redis 客户端。"""
+    client = getattr(request.app.state, "redis", None)
+    if client is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis 未配置")
+    return client
+
+
+RedisDep = Annotated[Redis, Depends(get_redis)]
 
 
 def _unauthorized() -> HTTPException:
@@ -48,13 +60,26 @@ async def get_access_token_identity(
 AccessTokenIdentityDep = Annotated[tuple[UUID, UUID], Depends(get_access_token_identity)]
 
 
-async def get_current_user(identity: AccessTokenIdentityDep, session: SessionDep) -> User:
-    """用会话状态和账号状态确认当前用户。"""
+async def get_current_session(
+    identity: AccessTokenIdentityDep, redis_client: RedisDep
+) -> tuple[UUID, UUID]:
+    """验证 Redis 中的登录会话，返回用户 ID 和会话 ID，不查 PostgreSQL。"""
     user_id, session_id = identity
+    if not await redis_session_repository.is_active(
+        redis_client, user_id=user_id, session_id=session_id
+    ):
+        raise _unauthorized()
+    return identity
+
+
+CurrentSessionDep = Annotated[tuple[UUID, UUID], Depends(get_current_session)]
+
+
+async def get_current_user(identity: CurrentSessionDep, session: SessionDep) -> User:
+    """需要用户资料时才读取账号，并确认账号仍启用。"""
+    user_id, _session_id = identity
     async with session.begin():
-        user = await auth_session_repository.get_active_user(
-            session, user_id=user_id, session_id=session_id, now=datetime.now(timezone.utc)
-        )
+        user = await user_repository.get_active_by_id(session, user_id)
     if user is None:
         raise _unauthorized()
     return user

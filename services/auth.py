@@ -5,6 +5,7 @@ from sqlite3 import SQLITE_CONSTRAINT_UNIQUE
 from uuid import UUID
 
 from pydantic import SecretStr
+from redis.asyncio import Redis
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from core.security import (
 )
 from models import AuthSession, RefreshToken, User
 from repositories import auth_session as auth_session_repository
+from repositories import redis_session as redis_session_repository
 from repositories import user as user_repository
 from schemas.auth import LoginRequest, RegisterRequest, TokenPair
 
@@ -50,7 +52,9 @@ async def register(session: AsyncSession, data: RegisterRequest) -> User:
     return user
 
 
-async def login(session: AsyncSession, data: LoginRequest, secret_key: SecretStr) -> TokenPair:
+async def login(
+    session: AsyncSession, redis_client: Redis, data: LoginRequest, secret_key: SecretStr
+) -> TokenPair:
     async with session.begin():
         user = await user_repository.get_by_email(session, data.email.lower())
         user_id = user.id if user is not None else None
@@ -71,10 +75,17 @@ async def login(session: AsyncSession, data: LoginRequest, secret_key: SecretStr
         )
         session.add(auth_session)
         await session.flush()
-        return _issue_token_pair(session, auth_session, secret_key=secret_key, now=now)
+        tokens = _issue_token_pair(session, auth_session, secret_key=secret_key, now=now)
+        await session.flush()
+        await redis_session_repository.activate(
+            redis_client, user_id=user_id, session_id=auth_session.id, expires_at=auth_session.expires_at
+        )
+    return tokens
 
 
-async def refresh(session: AsyncSession, token: str, secret_key: SecretStr) -> TokenPair:
+async def refresh(
+    session: AsyncSession, redis_client: Redis, token: str, secret_key: SecretStr
+) -> TokenPair:
     """持有会话锁后重新读取旧令牌；发现重用时先提交撤销，再拒绝请求。"""
     if len(token) != 43 or not token.isascii():
         raise InvalidRefreshToken
@@ -94,9 +105,16 @@ async def refresh(session: AsyncSession, token: str, secret_key: SecretStr) -> T
             raise InvalidRefreshToken
         if previous_token.consumed_at is not None:
             auth_session.revoked_at = now
+            await redis_session_repository.revoke(
+                redis_client, user_id=auth_session.user_id, session_id=auth_session.id
+            )
         else:
             user = await session.get(User, auth_session.user_id, populate_existing=True)
             if user is None or not user.is_active or _utc(previous_token.expires_at) <= now:
+                raise InvalidRefreshToken
+            if not await redis_session_repository.is_active(
+                redis_client, user_id=auth_session.user_id, session_id=auth_session.id
+            ):
                 raise InvalidRefreshToken
             previous_token.consumed_at = now
             return _issue_token_pair(session, auth_session, secret_key=secret_key, now=now)
@@ -104,12 +122,29 @@ async def refresh(session: AsyncSession, token: str, secret_key: SecretStr) -> T
     raise InvalidRefreshToken
 
 
-async def logout(session: AsyncSession, *, user_id: UUID, session_id: UUID) -> None:
-    """提交当前会话的撤销，使该会话的访问令牌和刷新令牌都失效。"""
+async def logout(
+    session: AsyncSession, redis_client: Redis, *, user_id: UUID, session_id: UUID
+) -> None:
+    """在持有数据库会话行锁时移除 Redis 会话，提交后再返回成功。"""
     async with session.begin():
         await auth_session_repository.revoke(
             session, user_id=user_id, session_id=session_id, now=datetime.now(timezone.utc)
         )
+        await redis_session_repository.revoke(redis_client, user_id=user_id, session_id=session_id)
+
+
+async def disable_user(session: AsyncSession, redis_client: Redis, *, user_id: UUID) -> bool:
+    """停用账号并撤销全部会话；供通过权限校验的管理业务调用。"""
+    async with session.begin():
+        user = await user_repository.get_for_update(session, user_id)
+        if user is None:
+            return False
+        user.is_active = False
+        session_ids = await auth_session_repository.revoke_all_for_user(
+            session, user_id=user_id, now=datetime.now(timezone.utc)
+        )
+        await redis_session_repository.revoke_all(redis_client, user_id=user_id, session_ids=session_ids)
+    return True
 
 
 def _issue_token_pair(

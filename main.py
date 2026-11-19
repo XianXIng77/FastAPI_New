@@ -4,10 +4,12 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.staticfiles import StaticFiles
+from redis.exceptions import RedisError
 
 from api.routes.auth import router as auth_router
-from core.config import PROJECT_ROOT
-from core.exception_handlers import request_validation_exception_handler
+from core.config import PROJECT_ROOT, settings
+from core.exception_handlers import redis_exception_handler, request_validation_exception_handler
+from core.redis_client import open_redis
 from db.session import async_engine
 
 
@@ -15,8 +17,11 @@ from db.session import async_engine
 async def lifespan(app: FastAPI):
     # 数据库建表交给 Alembic；应用退出时关闭数据库连接池。
     try:
-        yield
+        async with open_redis(settings) as redis_client:
+            app.state.redis = redis_client
+            yield
     finally:
+        app.state.redis = None
         await async_engine.dispose()
 
 
@@ -34,6 +39,7 @@ app.add_exception_handler(
     RequestValidationError,
     request_validation_exception_handler,
 )
+app.add_exception_handler(RedisError, redis_exception_handler)
 
 
 @app.get("/docs", include_in_schema=False)

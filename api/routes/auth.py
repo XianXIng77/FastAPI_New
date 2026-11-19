@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Response, status
 
-from api.deps import AccessTokenIdentityDep, CurrentUserDep, SessionDep
+from api.deps import AccessTokenIdentityDep, CurrentUserDep, RedisDep, SessionDep
 from core.config import settings
 from schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, RegisteredUser, TokenPair
 from schemas.response import ApiResponse
@@ -21,13 +21,15 @@ async def register(data: RegisterRequest, session: SessionDep) -> ApiResponse[Re
 
 
 @router.post("/login")
-async def login(data: LoginRequest, session: SessionDep, response: Response) -> ApiResponse[TokenPair]:
+async def login(
+    data: LoginRequest, session: SessionDep, redis_client: RedisDep, response: Response
+) -> ApiResponse[TokenPair]:
     """校验邮箱和密码，登录成功后签发一对令牌。"""
     secret_key = settings.jwt_secret_key
     if secret_key is None:
         raise HTTPException(status_code=503, detail="登录服务尚未配置")
     try:
-        tokens = await auth_service.login(session, data, secret_key)
+        tokens = await auth_service.login(session, redis_client, data, secret_key)
     except auth_service.InvalidCredentials as error:
         raise HTTPException(
             status_code=401, detail="邮箱或密码错误", headers={"WWW-Authenticate": "Bearer"}
@@ -37,13 +39,15 @@ async def login(data: LoginRequest, session: SessionDep, response: Response) -> 
 
 
 @router.post("/refresh", responses={401: {"description": "刷新令牌或会话不可用"}})
-async def refresh(data: RefreshRequest, session: SessionDep, response: Response) -> ApiResponse[TokenPair]:
+async def refresh(
+    data: RefreshRequest, session: SessionDep, redis_client: RedisDep, response: Response
+) -> ApiResponse[TokenPair]:
     """用仍有效的刷新令牌换取新的一对令牌，无需 Access Token。"""
     secret_key = settings.jwt_secret_key
     if secret_key is None:
         raise HTTPException(status_code=503, detail="登录服务尚未配置")
     try:
-        tokens = await auth_service.refresh(session, data.refresh_token.get_secret_value(), secret_key)
+        tokens = await auth_service.refresh(session, redis_client, data.refresh_token.get_secret_value(), secret_key)
     except auth_service.InvalidRefreshToken as error:
         raise HTTPException(status_code=401, detail="刷新令牌无效，请重新登录") from error
     response.headers["Cache-Control"] = "no-store"
@@ -51,10 +55,12 @@ async def refresh(data: RefreshRequest, session: SessionDep, response: Response)
 
 
 @router.post("/logout", responses={401: {"description": "缺少有效的访问令牌"}})
-async def logout(identity: AccessTokenIdentityDep, session: SessionDep) -> ApiResponse[None]:
+async def logout(
+    identity: AccessTokenIdentityDep, session: SessionDep, redis_client: RedisDep
+) -> ApiResponse[None]:
     """用 Access Token 撤销当前会话，无需请求体。"""
     user_id, session_id = identity
-    await auth_service.logout(session, user_id=user_id, session_id=session_id)
+    await auth_service.logout(session, redis_client, user_id=user_id, session_id=session_id)
     return ApiResponse[None].success(msg="退出成功")
 
 
