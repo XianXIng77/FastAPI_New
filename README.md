@@ -2,6 +2,10 @@
 
 本项目采用面向中大型工程的**分层架构**（对标 Spring Boot / MyBatis 经典分层思想），实现接口协议、业务逻辑、数据访问与底层基础设施的清晰解耦。
 
+目前已定义 `users`、`auth_sessions` 和 `refresh_tokens` 三个模型，并实现注册、登录、访问令牌鉴权、刷新轮换和退出；还未生成迁移。
+
+`auth_sessions` 记录每次登录属于哪个用户、会话最长有效期和撤销时间。`refresh_tokens` 只存令牌的 SHA-256 摘要，用 `session_id` 归属会话；轮换后保留旧摘要和 `consumed_at`，供后续检测重用。
+
 ---
 
 ## 一、整体请求调用链路
@@ -19,7 +23,7 @@ services/      ──► Service 业务逻辑层：编排业务流程、线程�
 repositories/  ──► Mapper / 仓库层：纯 SQL 组装与执行，不写业务判断，不私自 commit
    │  读写 ORM 实体 (models/)
    ▼
-db/            ──► 连接池与会话底座：提供全局连接池、每次请求独立 new 出 Session、挂载公共表字段
+db/            ──► 连接池与会话底座：提供全局连接池、每次请求独立创建 Session、统一登记表模型
    │
    ▼
 PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ 自动生成迁移脚本并建表
@@ -33,18 +37,18 @@ PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ �
 
 | 目录 | 定位 | 对标 Spring Boot 概念 | 核心职责与代表文件 |
 | :--- | :--- | :--- | :--- |
-| **`models/`** | 数据库实体层 | `Entity` / `PO` | 定义数据库表结构、主键、唯一索引（如 `models/user.py`）。注意新建表后需在 `models/__init__.py` 导出。 |
+| **`models/`** | 数据库实体层 | `Entity` / `PO` | 定义数据库表结构、主键、唯一索引。新建模型后在 `models/__init__.py` 导入，让 Alembic 能发现它。 |
 | **`schemas/`** | 数据契约层 | `DTO` + `VO` | 基于 Pydantic 校验前端入参（如 `UserCreate` 当 DTO）、过滤返回给前端的字段（如 `UserRead` 当 VO，屏蔽密码哈希）。 |
 | **`repositories/`** | 数据仓库层 | `Mapper` / `DAO` | 专门写 SQL（SQLAlchemy 链式表达式或原生 SQL），只管存取数据，不写业务规则，不手动提交事务。 |
 | **`services/`** | 业务逻辑层 | `Service` (`@Transactional`) | 串联业务步骤（密码加密、多表操作组合）、通过 `async with session.begin():` 统一控制事务边界、抛出业务异常。 |
-| **`api/`** | 接口路由层 | `Controller` + 权限门卫 | `api/routes/` 定义 URL 与请求方式；`api/deps.py` 声明接口共用依赖（如获取数据库会话 `SessionDep`、校验登录令牌 `CurrentUserDep`）。 |
+| **`api/`** | 接口路由层 | `Controller` + 权限门卫 | `api/routes/` 放接口路由；`api/deps.py` 提供数据库会话依赖 `SessionDep`。 |
 
 ### 2. 底座支撑层（搭好后日常很少改动）
 
 | 目录 | 定位 | 核心职责与代表文件 |
 | :--- | :--- | :--- |
 | **`core/`** | 框架内核底座 | **不含任何具体业务代码**（换个新项目也能直接搬走复用）。负责：<br>• `config.py`：读取 `.env` 环境变量与全局配置<br>• `security.py`：密码 Argon2 哈希、JWT 签发与解码等底层安全算法<br>• `exception_handlers.py`：全局异常拦截兜底（如 422 校验错误隐藏敏感输入）<br>• 后续可扩展：`exceptions.py`（全局业务异常基类）、`logging.py`（全局日志）、`middlewares.py`（全站耗时/跨域/`Request-ID`） |
-| **`db/`** | 数据库基础设施 | • `session.py`：配置连接池参数（`async_engine`）与会话生产工厂（`AsyncSessionLocal`），每次请求独立生成并归还 `Session`<br>• `base.py`：所有 `models` 继承的公共父类 `Base`（统一附带 `created_at`、`updated_at` 公共字段） |
+| **`db/`** | 数据库基础设施 | • `session.py`：配置连接池参数（`async_engine`）与会话生产工厂（`AsyncSessionLocal`），每次请求独立生成并归还 `Session`<br>• `base.py`：所有模型继承的公共父类 `Base`，用于登记表结构；目前未启用公共时间字段。 |
 | **`utils/`** | 通用工具箱 | 存放与业务、框架配置完全无关的**纯无状态工具函数**（如日期转换、字符串脱敏、随机码生成，单独拷走也能直接运行）。 |
 
 ### 3. 工程配套与其他目录
@@ -52,10 +56,24 @@ PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ �
 | 目录 | 定位 | 说明 |
 | :--- | :--- | :--- |
 | **`alembic/`** | 数据库版本迁移 | 相当于 Flyway。自动扫描 `models/` 的变更生成迁移脚本（存于 `alembic/versions/`），执行命令即可在数据库自动建表/改表，日常无需手写。 |
-| **`tests/`** | 自动化测试 | 使用 `pytest` + 内存数据库验证接口状态码、参数拦截、落库结果与异常回滚。 |
-| **`crud/`** | 早期遗留空目录 | 轻量级教程常将 `services + repositories` 合并为 `crud`；本项目已升级为更规范的 `services + repositories` 分层，该空目录无需使用，可直接删除。 |
+| **`tests/`** | 自动化测试 | 提供 `pytest` + 内存数据库测试夹具，供新增接口后编写测试时使用。 |
 
 ---
+
+### 4. 接口响应约定
+
+- **业务接口**：在路由声明 `response_model=ApiResponse[数据类型]`，用 `ApiResponse[数据类型].success(data)` 返回 `code`、`msg` 和 `data`。业务码不替代 HTTP 状态码，现有异常响应保持不变。
+- **注册**：`POST /auth/register` 接收 JSON：`email`、`username`、`password`（15–128 字符）。HTTP `201`，统一响应的 `data` 返回账号资料，不返回密码；邮箱或用户名重复返回 `409`。
+- **登录**：`POST /auth/login` 接收 JSON：`email`、`password`。成功时从统一响应的 `data` 读取 `access_token`、`refresh_token`、`token_type` 和 `expires_in`，无效凭据统一返回 `401`。
+- **当前用户**：`GET /auth/me` 接收请求头 `Authorization: Bearer <access_token>`，先校验 JWT，再查会话和账号状态。成功时 `data` 返回 `id`、`email` 和 `username`；缺少令牌、令牌或会话过期、会话已撤销、账号停用均返回 `401`。刷新令牌不能用来访问这个接口。
+- **刷新**：`POST /auth/refresh` 接收 JSON：`{"refresh_token":"<refresh_token>"}`，不需要 Access Token。成功时用 `data` 里的两枚新令牌替换本地旧值。刷新不会延长会话的最长有效期，也不会立即撤销旧 Access Token；重用已消费的 Refresh Token 会撤销其整个会话，使该会话的所有令牌失效。客户端应避免并发刷新或用同一枚旧令牌自动重试，收到 `401` 后重新登录。
+- **退出**：`POST /auth/logout` 携带尚未过期的 Access Token，无需请求体。成功时返回统一响应，`data` 为 `null`。后端撤销当前会话，此会话的所有 Access Token 和 Refresh Token 都失效，其他设备的会话不受影响。用同一枚尚未过期的 JWT 重复退出也返回 `200`；客户端收到成功响应后清除本地令牌。
+
+联调前先在空的开发库完成下文的建表流程，再用 `python -c "import secrets; print(secrets.token_hex(32))"` 生成签名密钥，将输出填入本地 `.env` 的 `JWT_SECRET_KEY`，不要提交或分享。默认 Access Token 有效期 15 分钟、Refresh Token 7 天、会话最长 30 天。当前接口以 JSON 返回双令牌用于 API 联调；接入网页时不要把令牌存入 `localStorage`。
+
+在 `/docs` 测试时，先注册和登录，再把 `data.access_token` 粘贴到 **Authorize**（不加 `Bearer` 前缀），执行 `GET /auth/me`。然后调用刷新接口，用返回的新 Access Token 更新 **Authorize**，再执行 `POST /auth/logout`。退出后用该会话的 Access Token 请求 `/auth/me`，或用其 Refresh Token 请求 `/auth/refresh`，均应返回 `401`。其他需要登录的接口可以声明 `current_user: CurrentUserDep` 复用同一套校验。
+
+打开 [认证测试页](http://127.0.0.1:8000/ui/) 也可以联调这五个接口。登录和刷新会更新页面内存中的令牌；退出后可点「验证退出失效」，检查旧 Access Token 和 Refresh Token 是否都返回 401。请使用测试账号；刷新页面只清除本地令牌，不撤销服务端会话。
 
 ## 三、核心边界防混淆备忘
 
@@ -78,7 +96,7 @@ PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ �
 
 ### 新增一张表及接口的步骤
 1. **写表模型**：在 `models/` 下新建实体类（继承 `Base`），并在 `models/__init__.py` 中导入导出。
-2. **同步建表**：
+2. **同步建表**：首次生成迁移时，先确认 `.env` 指向项目专用的空库，并安装 `requirements-migrations.txt` 中的依赖。
    ```bash
    # 1. 自动对比 models 生成迁移脚本（生成后建议点开 alembic/versions/ 扫一眼确认无误，尤其注意字段改名场景）
    alembic revision --autogenerate -m "描述本次表变更"
@@ -98,7 +116,7 @@ PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ �
 uvicorn main:app --reload
 
 # 接口交互文档（启动后浏览器访问）
-# Swagger UI: http://127.0.0.1:8000/docs
+# Swagger UI（静态资源从项目本地提供，无需外网 CDN）: http://127.0.0.1:8000/docs
 # ReDoc:      http://127.0.0.1:8000/redoc
 
 # 运行自动化测试

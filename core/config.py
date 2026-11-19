@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from pydantic import Field
+from typing import Annotated
+
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +16,10 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=10, ge=0)
     db_max_overflow: int = Field(default=20, ge=-1)
     db_pool_pre_ping: bool = True
+    jwt_secret_key: Annotated[SecretStr, Field(min_length=32)] | None = None
+    access_token_lifetime_seconds: int = Field(default=900, gt=0)
+    refresh_token_lifetime_seconds: int = Field(default=604800, gt=0)
+    auth_session_lifetime_seconds: int = Field(default=2592000, gt=0)
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
