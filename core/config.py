@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     """统一读取配置；环境变量优先于项目根目录的 .env。"""
 
+    port: int = Field(default=810, ge=1, le=65535)
     database_url: str = Field(min_length=1)
     db_pool_size: int = Field(default=10, ge=0)
     db_max_overflow: int = Field(default=20, ge=-1)

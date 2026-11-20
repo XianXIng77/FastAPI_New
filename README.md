@@ -73,10 +73,6 @@ PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ �
 
 在 `/docs` 测试时，先注册和登录，再把 `data.access_token` 粘贴到 **Authorize**（不加 `Bearer` 前缀），执行 `GET /auth/me`。然后调用刷新接口，用返回的新 Access Token 更新 **Authorize**，再执行 `POST /auth/logout`。退出后用该会话的 Access Token 请求 `/auth/me`，或用其 Refresh Token 请求 `/auth/refresh`，均应返回 `401`。其他需要登录的接口可以声明 `current_user: CurrentUserDep` 复用同一套校验。
 
-打开 [认证测试页](http://127.0.0.1:8000/ui/) 也可以联调这五个接口。登录和刷新会更新页面内存中的令牌；退出后可点「验证退出失效」，检查旧 Access Token 和 Refresh Token 是否都返回 401。请使用测试账号；刷新页面只清除本地令牌，不撤销服务端会话。
-
-请通过 FastAPI 的 `/ui/` 打开测试页，不要直接用 IDE 的静态预览作为接口地址。PyCharm 默认 `63342` 端口的预览会自动跳转到 `http://127.0.0.1:8000/ui/`；如果启动时指定了其他端口，请直接访问那个端口的 `/ui/`。
-
 ## 三、核心边界防混淆备忘
 
 1. **`schemas/` vs `models/`**
@@ -123,14 +119,21 @@ PostgreSQL 数据库  ◄── 表结构由 models/ 定义，通过 alembic/ �
 Redis 会话键是鉴权依据，不要与可随意淘汰的业务缓存混用；也不要从旧快照或落后的副本恢复并继续信任旧会话键。Redis 故障返回 `503`，不会跳过检查。
 
 ### 本地启动与测试命令
+
+运行 `python main.py` 时，后端从项目根目录的 `.env` 读取 `PORT`，默认端口为 `810`。直接用 `uvicorn` 命令启动时，通过 `--port` 指定端口。
+
 ```bash
-# 启动开发服务器（支持热重载）
-uvicorn main:app --reload
+# 启动后端开发服务器（支持热重载）
+python main.py
+
+# 在另一个终端启动前端开发服务器（http://127.0.0.1:7000/）
+cd ui
+npm run dev
 
 # 接口交互文档（启动后浏览器访问）
-# Swagger UI（静态资源从项目本地提供，无需外网 CDN）: http://127.0.0.1:8000/docs
-# ReDoc:      http://127.0.0.1:8000/redoc
+# Swagger UI（静态资源从项目本地提供，无需外网 CDN）: http://127.0.0.1:810/docs
+# ReDoc:      http://127.0.0.1:810/redoc
 
-# 运行自动化测试
+# 在项目根目录运行自动化测试
 python -m pytest -q
 ```

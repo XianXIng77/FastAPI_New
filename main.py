@@ -60,3 +60,9 @@ async def swagger_ui(request: Request):
 @app.get("/docs/oauth2-redirect", include_in_schema=False)
 async def swagger_ui_oauth2_redirect():
     return get_swagger_ui_oauth2_redirect_html()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", port=settings.port, reload=True)
