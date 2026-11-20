@@ -11,6 +11,7 @@ from core.config import PROJECT_ROOT, settings
 from core.exception_handlers import redis_exception_handler, request_validation_exception_handler
 from core.redis_client import open_redis
 from db.session import async_engine
+from tasks.scheduler import open_scheduler
 
 
 @asynccontextmanager
@@ -19,7 +20,8 @@ async def lifespan(app: FastAPI):
     try:
         async with open_redis(settings) as redis_client:
             app.state.redis = redis_client
-            yield
+            async with open_scheduler():
+                yield
     finally:
         app.state.redis = None
         await async_engine.dispose()

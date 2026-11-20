@@ -5,3 +5,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# FastScheduler runtime state
+/fastscheduler_state*.json
+/fastscheduler_state*.tmp
